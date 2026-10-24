@@ -1,9 +1,19 @@
+"""
+Embedding 模块：本地 Qwen3-Embedding-0.6B 单例加载（CUDA 优先）
+- generate_embedding：批量给分块追加向量（入库用）
+- embed_texts：文本列表 → 向量列表（检索/分类共用）
+- ChromaEmbeddingFunction：包装成 ChromaDB 需要的接口（全项目共用）
+"""
+
+import logging
 import os
-import torch
-from sentence_transformers import SentenceTransformer
 import time
 from typing import List, Dict
-import logging
+
+import torch
+from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
+from sentence_transformers import SentenceTransformer
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,7 +24,11 @@ _model = None
 def get_model():
     global _model
     if _model is None:
-        MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models/Qwen3-Embedding-0.6B")
+        # 模型目录在项目根 models/（文件在 services/vector/ 下，上三级为项目根）
+        MODEL_PATH = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "models/Qwen3-Embedding-0.6B",
+        )
         _model = SentenceTransformer(MODEL_PATH, device=device)
         logger.info(f"=== Embedding 模块启动 ===")
         logger.info(f"当前使用设备：{device}")
@@ -59,12 +73,11 @@ def generate_embedding(chunks: List[Dict], batch_size: int = 32) -> List[Dict]:
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     model = get_model()
-    return model.encode(texts, normalize_embeddings=True, show_progress_bar=True).tolist()
+    return model.encode(texts, normalize_embeddings=True, show_progress_bar=False).tolist()
 
-if __name__ == "__main__":
-    # basicConfig 配置...
-    model = get_model()
-    test_chunks = [{"text": "这是一个测试句子", "meta": {}}]
-    result = generate_embedding(test_chunks)
-    print(f"向量维度: {len(result[0]['embedding'])}")
+class ChromaEmbeddingFunction(EmbeddingFunction):
+    """把本地 embedding 包装成 ChromaDB 需要的格式（全项目共用）"""
+    def __call__(self, input: Documents) -> Embeddings:
+        return embed_texts(input)
+
 

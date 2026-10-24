@@ -1,9 +1,22 @@
-from typing import List, Dict, Any
+"""
+文件解析与分块模块：
+1. FileParser：按后缀解析 pdf/docx/txt/xlsx/pptx 为片段（location + raw_text）
+2. TextCleaner：清洗文本（去孤立页码行、修复 PDF 断行）
+3. DocumentChunker：按标题层级切分全文 → 语义完整的 chunk（text + meta 溯源信息）
+"""
+
+import re
 from pathlib import Path
+from typing import List, Dict, Any
+
 import pdfplumber
 from docx import Document
+from langchain_community.document_loaders import (
+    UnstructuredExcelLoader,
+    UnstructuredPowerPointLoader,
+)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import TextLoader, UnstructuredExcelLoader, UnstructuredPowerPointLoader
+
 
 class FileParser:
     """ 文件解析： pdf、docx、txt、xlsx、pptx """
@@ -31,7 +44,7 @@ class FileParser:
         with open(file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
         for line_idx, line in enumerate(lines, start=1):
-            result.append({"location": f"文本行：{line_idx}", "raw_text":line})
+            result.append({"location": f"文本行：{line_idx}", "raw_text": line})
         return result
 
     @staticmethod
@@ -69,11 +82,12 @@ class FileParser:
             raise Exception(f"暂不支持文件后缀{suffix}")
         return mapping[suffix](file_path)
 
+
 class TextCleaner:
     """文本清洗：保留段落换行，清除多余空白、孤立页码行，修复pdf断行"""
+
     @staticmethod
     def clean_single_text(text: str) -> str:
-        import re
         text = text.strip()
         # 连续多个换行替换成双换行，保留段落
         text = re.sub(r'\n\s*\n+', '\n\n', text)
@@ -87,8 +101,6 @@ class TextCleaner:
         content = "\n".join(out_lines)
         content = content.replace("-\n", "")
         return content
-
-import re
 
 
 class DocumentChunker:

@@ -1,15 +1,19 @@
-import os
+"""
+VectorStore：两层 ChromaDB 向量库
+- categories 层：类别描述向量，用于入库自动分类与查询自动路由
+- chunks 层：分块文本 + 向量 + 元数据，每条带 category 字段
+"""
+
 import logging
+import os
 from typing import List, Dict, Callable
+
 import chromadb
+
+from services.vector.embedding_service import ChromaEmbeddingFunction
+
 logger = logging.getLogger(__name__)
 
-from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
-class _ChromaEmbeddingFunction(EmbeddingFunction):
-
-    def __call__(self, input: Documents) -> Embeddings:
-        from services.embedding_service import embed_texts
-        return embed_texts(input)
 
 class VectorStore:
     """
@@ -23,9 +27,10 @@ class VectorStore:
         所有分块文本 + 向量 + 元数据，每条都带 category 字段。
     """
     def __init__(self, embed_function: Callable[[List[str]], List[List[float]]] = None):
-        # 数据库持久化目录：和本文件同级的 chroma_db 文件夹
+        # 数据库持久化目录：项目根 data/chroma_db（文件在 services/vector/ 下，上三级为项目根）
         persist_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "chroma_db"
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "data", "chroma_db",
         )
         self.client = chromadb.PersistentClient(path=persist_dir)
         self.embed_function = embed_function
@@ -34,13 +39,13 @@ class VectorStore:
         self.chunks_col = self.client.get_or_create_collection(
             name="chunks",
             metadata={"hnsw:space": "cosine"},
-            embedding_function=_ChromaEmbeddingFunction()
+            embedding_function=ChromaEmbeddingFunction()
         )
         # 第一层：类别集合
         self.categories_col = self.client.get_or_create_collection(
             name="categories",
             metadata={"hnsw:space": "cosine"},
-            embedding_function=_ChromaEmbeddingFunction()
+            embedding_function=ChromaEmbeddingFunction()
         )
         logger.info(
             f"向量库初始化完成: chunks={self.chunks_col.count()} 条, "
@@ -69,7 +74,7 @@ class VectorStore:
         )
         logger.info(f"已初始化{len(names)}个类别：{names}")
 
-    def _classify(self, embedding: List[float]) -> str:
+    def classify(self, embedding: List[float]) -> str:
         """
         自动将文档归类
         内部方法：给一个 chunk 的向量，返回最匹配的类别名。
@@ -111,7 +116,7 @@ class VectorStore:
             documents.append(chunk["text"])
             embeddings.append(chunk["embedding"])
             meta = dict(chunk["meta"])
-            cat = category or self._classify(chunk["embedding"])
+            cat = category or self.classify(chunk["embedding"])
             meta["category"] = cat
             metadatas.append(meta)
 
@@ -139,7 +144,7 @@ class VectorStore:
         """
         # 没指定类别就先自动路由
         if category is None:
-            category = self._classify(query_embedding)
+            category = self.classify(query_embedding)
             if category and category != "未分类":
                 logger.info(f"自动判断问题属于类别：{category}")
 
@@ -172,41 +177,4 @@ class VectorStore:
         """按 doc_id 删除某个文档的所有 chunk（重新上传时先调这个）"""
         self.chunks_col.delete(where={"doc_id": doc_id})
         logger.info(f"已删除文档 {doc_id} 的所有 chunk")
-
-
-if __name__ == "__main__":
-    import logging
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-    from embedding_service import embed_texts
-
-    vs = VectorStore(embed_function=embed_texts)
-    vs.seed_categories({
-        "人事行政": "公司考勤制度、请假流程、年假病假、报销标准、出差审批、工资福利、入职离职、人事行政规定",
-        "技术运维": "服务器部署、系统配置、故障排查、命令行操作、重启维护、环境搭建、数据库管理、网络安全",
-        "产品FAQ": "产品功能介绍、客户常见问题、收费标准、使用教程、售后服务、账号管理、功能更新",
-    })
-
-    # 用真实 embedding，不要用 [0.1]*1024
-    test_texts = [
-        "年假需提前三天在OA系统提交申请，病假需提供医院开具的诊断证明，部门负责人审批后交人事部备案。",
-        "服务器出现故障时使用sudo reboot命令重启系统，重启前需通知运维团队，重启后检查Nginx和数据库服务是否正常启动。",
-    ]
-
-    vectors = embed_texts(test_texts)  # 真实向量
-
-    test_chunks = [
-        {"text": test_texts[0],
-         "meta": {"doc_id": "test_001", "doc_name": "考勤制度.txt"},
-         "embedding": vectors[0]},
-        {"text": test_texts[1],
-         "meta": {"doc_id": "test_002", "doc_name": "运维手册.txt"},
-         "embedding": vectors[1]},
-    ]
-
-    vs.add_chunks(test_chunks)
-    print("所有类别:", vs.list_categories())
 
