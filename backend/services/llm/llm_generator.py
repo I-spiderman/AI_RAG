@@ -7,8 +7,8 @@ DeepSeek 重试 2 次（总3次尝试）→ ollama 尝试 1 次 → 兜底文案
 import logging
 import time
 from typing import List, Dict, Optional, Iterator
-from services.llm.llm_client import (get_client, get_deepseek_client, MODEL, DEEPSEEK_MODEL,
-                                     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL)
+from backend.services.llm.llm_client import (get_client, get_deepseek_client, MODEL, DEEPSEEK_MODEL,
+                                             DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL)
 
 logger = logging.getLogger(__name__)
 

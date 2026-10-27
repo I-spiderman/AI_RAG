@@ -31,7 +31,7 @@ import logging
 import os
 import redis
 from typing import List, Dict, Tuple, Callable, Optional
-from services.llm.llm_client import get_client, MODEL
+from backend.services.llm.llm_client import get_client, MODEL
 
 logger = logging.getLogger(__name__)
 

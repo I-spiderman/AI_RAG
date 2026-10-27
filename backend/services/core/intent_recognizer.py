@@ -18,8 +18,8 @@ import math
 import re
 from typing import List, Dict, Optional
 
-from services.vector.embedding_service import embed_texts
-from services.llm.llm_client import get_client, MODEL
+from backend.services.vector.embedding_service import embed_texts
+from backend.services.llm.llm_client import get_client, MODEL
 
 logger = logging.getLogger(__name__)
 

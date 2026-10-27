@@ -16,10 +16,32 @@ from langchain_community.document_loaders import (
     UnstructuredPowerPointLoader,
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+from docx.oxml.ns import qn
 
 
 class FileParser:
     """ 文件解析： pdf、docx、txt、xlsx、pptx """
+
+    # 章节标题正则（与 DocumentChunker._H1_RE 对齐）：中文数字顿号 或【xxx】
+    _SECTION_RE = re.compile(r'^[一二三四五六七八九十百]{1,3}、|^【[^】]+】')
+
+    @staticmethod
+    def _table_to_markdown(table) -> str:
+        """把 docx 表格转成 Markdown（首行作表头；合并单元格去重保留）。"""
+        rows = table.rows
+        if not rows:
+            return ""
+        md_rows = []
+        for row in rows:
+            cells = [c.text.strip() for c in row.cells]
+            cells = list(dict.fromkeys(cells))  # 合并单元格同一对象重复出现 → 去重
+            md_rows.append("| " + " | ".join(cells) + " |")
+        if len(md_rows) >= 1:
+            n_cols = len(md_rows[0].split("|")) - 2  # 去掉首尾空串
+            md_rows.insert(1, "| " + " | ".join(["---"] * max(n_cols, 1)) + " |")
+        return "\n".join(md_rows)
 
     @staticmethod
     def parse_pdf(file_path: str) -> List[Dict[str, Any]]:
@@ -34,8 +56,40 @@ class FileParser:
     def parse_docx(file_path: str) -> List[Dict[str, Any]]:
         doc = Document(file_path)
         result = []
-        for para_idx, para in enumerate(doc.paragraphs, start=1):
-            result.append({"location": f"Word段落：{para_idx}", "raw_text": para.text})
+        current_section = "未命名"  # 追踪最近的章节标题
+        table_idx = 0
+
+        # 按文档真实顺序遍历（段落与表格交错出现），而不是分开遍历
+        for child in doc.element.body.iterchildren():
+            if child.tag == qn('w:p'):
+                para = Paragraph(child, doc)
+                text = para.text.strip()
+                if not text:
+                    continue
+                # 目录(TOC)行：形如 "一、公司简介\t1" —— 章节格式但带 \t 页码，
+                # 既不是正文也不是标题，直接跳过，避免被当成一级标题切出脏 chunk
+                if FileParser._SECTION_RE.match(text) and "\t" in text:
+                    continue
+                # 章节标题识别（与 chunker 对齐：中文数字顿号 / 【xxx】）
+                if FileParser._SECTION_RE.match(text) and len(text) <= 30:
+                    current_section = text
+                result.append({
+                    "location": f"Word段落：{len(result) + 1}",
+                    "raw_text": para.text,
+                    "section": current_section,
+                    "type": "para",
+                })
+
+            elif child.tag == qn('w:tbl'):
+                table_idx += 1
+                md = FileParser._table_to_markdown(Table(child, doc))
+                if md.strip():
+                    result.append({
+                        "location": f"第{table_idx}张表",
+                        "raw_text": md,
+                        "section": current_section,  # ← 绑定：这张表属于哪个章节
+                        "type": "table",
+                    })
         return result
 
     @staticmethod
@@ -263,19 +317,44 @@ class DocumentChunker:
         return chunks
 
     def chunk_document(self, parsed_fragments: List[Dict], doc_id: str, doc_name: str) -> List[Dict]:
-        # 清洗并拼接全文，同时记录每个 fragment 在 full_text 中的字符区间
-        cleaned_list = []
-        spans = []  # [(location, start_char, end_char), ...]
-        cursor = 0
-        for frag in parsed_fragments:
-            cleaned = TextCleaner.clean_single_text(frag["raw_text"])
-            cleaned_list.append(cleaned)
-            spans.append((frag["location"], cursor, cursor + len(cleaned)))
-            cursor += len(cleaned) + 2  # +2 对应 join 用的 "\n\n"
-        full_text = "\n\n".join(cleaned_list)
-
+        """
+        方案A：表格不抽离，按真实顺序内嵌回正文流，统一按标题层级切分。
+        - 段落与（Markdown 化后的）表格按原顺序拼成 full_text，各自记录 span；
+        - 整张表超过 chunk_max_size 的“大表”单独成块兜底，避免被递归切分切断；
+        - 表格在所属章节内与前后文字同块，检索时上下文更完整。
+        """
         final_chunks: List[Dict] = []
 
+        # 清洗并分流：超大表格独立成块，其余（段落 + 小表）参与全文拼接
+        inline_parts = []   # 参与 full_text 的片段
+        big_tables = []     # 超大表格：独立成块兜底
+        for frag in parsed_fragments:
+            cleaned = TextCleaner.clean_single_text(frag["raw_text"]).strip()
+            if not cleaned:
+                continue
+            if frag.get("type") == "table" and len(cleaned) > self.chunk_max_size:
+                block_text = self._make_block(frag.get("section", "未命名"), "", cleaned)
+                meta = {
+                    "doc_id": doc_id,
+                    "doc_name": doc_name,
+                    "chapter_title": frag.get("section", "未命名"),
+                    "location": frag["location"],
+                }
+                big_tables.append({"text": block_text, "meta": meta})
+            else:
+                inline_parts.append({"cleaned": cleaned, "frag": frag})
+
+        # 按原始顺序拼 full_text，并记录每个片段的 location 与字符区间
+        cleaned_list = []
+        spans = []
+        cursor = 0
+        for p in inline_parts:
+            cleaned_list.append(p["cleaned"])
+            spans.append((p["frag"]["location"], cursor, cursor + len(p["cleaned"])))
+            cursor += len(p["cleaned"]) + 2  # +2 对应 join 用的 "\n\n"
+        full_text = "\n\n".join(cleaned_list)
+
+        # 统一按标题层级切分（表格已内嵌，自然落在所属章节内）
         for chap in self.split_by_title(full_text):
             # 跳过既无标题也无正文的空章节
             if not chap["title"] and not chap["content"].strip():
@@ -318,4 +397,8 @@ class DocumentChunker:
                                 doc_id, doc_name, chap["title"], child["title"], child["content"],
                                 spans, child_base,
                             ))
+
+        # 大表独立块补在末尾（检索不依赖顺序；表格已带 chapter_title 溯源）
+        final_chunks.extend(big_tables)
         return final_chunks
+

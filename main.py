@@ -1,28 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-智能客服 RAG 系统：命令行交互入口
+智能客服 RAG 系统：Web 服务统一启动入口
 
-业务组装在 services/rag_service.py（RAGService），本文件只负责：
-- 日志配置（入口职责）
-- 命令行问答循环
-
-命令：
-    普通输入            → 提问（流式打印）
-    "入库:<文件路径>"   → 文档解析分块入库
-    "exit"/"退出"       → 退出并归档会话（画像兜底提取）
+启动：
+    python main.py               # 启动 FastAPI（0.0.0.0:8000，reload 开发模式）
+                                 # 前端有构建产物（frontend/dist）时由 FastAPI 直接托管，
+                                 # 否则浏览器访问 Vite 开发服务器（cd frontend && npm run dev）
 """
 
 import logging
 import os
 from logging.handlers import RotatingFileHandler
-from services.core.rag_service import RAGService
+from backend.services.core.rag_service import RAGService
 
 # 日志目录（首次运行时创建）
 os.makedirs("logs", exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
-    datefmt="%Y-%m-%d %H:%M:%S",
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
@@ -33,30 +28,9 @@ logging.basicConfig(
         ),
     ],
 )
-logger = logging.getLogger("main")
 
 if __name__ == "__main__":
-    rag = RAGService()
+    import uvicorn
+    # app 实例与路由定义在 app/main.py（uvicorn 按字符串导入，日志配置在此已先行完成）
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
 
-    print("=" * 50)
-    print("智能客服 RAG 系统已就绪")
-    print("输入问题直接提问；输入 入库:<文件路径> 入库文档；输入 退出 结束")
-    print("=" * 50)
-
-    while True:
-        q = input("\n你：").strip()
-        if not q:
-            continue
-        if q in ("exit", "退出", "quit", "q"):
-            rag.archive_session()
-            print("已归档会话，再见！")
-            break
-        if q.startswith("入库:"):
-            n = rag.ingest_file(q[3:].strip())
-            print(f"  入库完成：{n} 块")
-            continue
-
-        print("\n助手：", end="", flush=True)
-        for piece in rag.ask_stream(q):
-            print(piece, end="", flush=True)
-        print()

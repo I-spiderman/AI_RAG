@@ -11,30 +11,44 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import List, Dict, Iterator, Optional
+from typing import List, Dict, Iterator
 
-from services.document.file_process import FileParser, DocumentChunker
-from services.vector.embedding_service import generate_embedding, embed_texts
-from services.vector.vector_store import VectorStore
-from services.retrieval.retrieval import Retriever
-from services.memory.short_memory_service import MemoryService
-from services.memory.long_memory import LongTermMemory, TicketMemory
-from services.llm.prompt_builder import PromptBuilder
-from services.llm.llm_generator import LLMGenerator
-from services.core.intent_recognizer import (
+from backend.services.document.file_process import FileParser, DocumentChunker
+from backend.services.vector.embedding_service import generate_embedding, embed_texts
+from backend.services.vector.vector_store import VectorStore
+from backend.services.retrieval.retrieval import Retriever
+from backend.services.memory.short_memory_service import MemoryService
+from backend.services.memory.long_memory import LongTermMemory, TicketMemory
+from backend.services.llm.prompt_builder import PromptBuilder
+from backend.services.llm.llm_generator import LLMGenerator
+from backend.services.core.intent_recognizer import (
     IntentRecognizer,
     QUERY_KNOWLEDGE, QUERY_TICKET, CHITCHAT, REQUEST_HUMAN,
 )
-from services.llm.chitchat import ChitchatEngine
-from services.memory.ticket_service import TicketQueryService
+from backend.services.llm.chitchat import ChitchatEngine
+from backend.services.memory.ticket_service import TicketQueryService
 
 logger = logging.getLogger(__name__)
 
 # 预定义类别
 CATEGORIES = {
+    "企业概况": "公司简介、公司全称、成立时间、总部地点、企业性质、使命愿景价值观、"
+              "发展历程与里程碑事件、关键运营数据（GMV/用户/商家/SKU）、组织架构、联系方式",
     "人事行政": "公司考勤制度、请假流程、年假病假、报销标准、出差审批、工资福利、入职离职、人事行政规定",
     "技术运维": "服务器部署、系统配置、故障排查、命令行操作、重启维护、环境搭建、数据库管理、网络安全",
     "产品FAQ": "产品功能介绍、客户常见问题、收费标准、使用教程、售后服务、账号管理、功能更新",
+    # 新增：财务结算（平台抽成/发票/退款到账）
+    "财务结算": "发票开具、对账核对、结算周期、退款到账、平台佣金、账单查询、打款提现、费用标准",
+    # 新增：物流配送（发货/物流/配送范围）
+    "物流配送": "发货时效、运费标准、物流查询、配送范围、快递时效、签收异常、拒收处理、仓储发货",
+    # 新增：营销活动（优惠/会员/积分）
+    "营销活动": "优惠券、满减活动、促销规则、会员权益、积分兑换、活动报名、推广资源位、宣传物料",
+    # 新增：售后维权（退换货/投诉/赔付）
+    "售后维权": "退换货政策、质量问题处理、投诉渠道、售后时效、赔付标准、纠纷处理、假一赔三",
+    # 新增：商家服务（B端入驻/店铺/结算）
+    "商家服务": "商家入驻、入驻条件、店铺管理、商家后台、结算提现、商家培训、经营报表、产业带赋能",
+    # 新增：安全合规（账号/隐私/监管）
+    "安全合规": "账号安全、隐私保护、数据安全、信息合规、实名认证、权限管理、未成年人保护、监管要求",
 }
 
 # 转人工话术

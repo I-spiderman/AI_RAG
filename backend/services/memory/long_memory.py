@@ -6,8 +6,8 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import pymysql
 import chromadb
-from services.vector.embedding_service import embed_texts, ChromaEmbeddingFunction
-from services.llm.llm_client import get_client, MODEL
+from backend.services.vector.embedding_service import embed_texts, ChromaEmbeddingFunction
+from backend.services.llm.llm_client import get_client, MODEL
 from dotenv import load_dotenv
 
 load_dotenv()
