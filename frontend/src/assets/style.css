@@ -1,0 +1,441 @@
+/* ===== 全局极简风格 ===== */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: #f5f6f8;
+  color: #333;
+}
+
+/* ===== 登录 / 注册页 ===== */
+.auth-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+
+.card {
+  background: #fff;
+  width: 380px;
+  padding: 32px;
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+}
+
+h1 {
+  font-size: 20px;
+  text-align: center;
+  margin-bottom: 24px;
+  font-weight: 600;
+}
+
+.tabs {
+  display: flex;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #e5e6eb;
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 10px 0;
+  text-align: center;
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-size: 14px;
+  color: #666;
+  border-bottom: 2px solid transparent;
+}
+
+.tab-btn.active {
+  color: #1677ff;
+  border-bottom-color: #1677ff;
+  font-weight: 600;
+}
+
+.form-item { margin-bottom: 16px; }
+
+label {
+  display: block;
+  font-size: 13px;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  font-size: 14px;
+  outline: none;
+}
+
+input:focus { border-color: #1677ff; }
+
+.btn {
+  width: 100%;
+  padding: 11px 0;
+  border: none;
+  border-radius: 6px;
+  background: #1677ff;
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.btn:hover { background: #0958d9; }
+
+.error {
+  color: #d4380d;
+  font-size: 13px;
+  min-height: 18px;
+  margin-bottom: 12px;
+}
+
+/* ===== 多会话布局 ===== */
+/* 固定为「一屏高」并禁止外层滚动：滚动只发生在 .msg-list / .session-list 内部 */
+.chat-layout {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;   /* 移动端浏览器地址栏伸缩时更稳定；不支持则回退 100vh */
+  overflow: hidden;
+}
+
+/* 左侧会话列表 */
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #fafafa;
+  border-right: 1px solid #e5e6eb;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-head {
+  flex: 0 0 auto;
+  padding: 14px 12px;
+  border-bottom: 1px solid #e5e6eb;
+}
+
+.new-chat-btn {
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  border-radius: 6px;
+  background: #1677ff;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.new-chat-btn:hover { background: #4096ff; }
+
+.session-list {
+  flex: 1 1 0;
+  min-height: 0;      /* flex 子项必须显式允许收缩，否则内容会撑破外层 */
+  overflow-y: auto;
+}
+
+.session-item {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-item:hover { background: #f0f0f0; }
+
+.session-item.active {
+  background: #e6f4ff;
+  color: #1677ff;
+}
+
+/* ===== 聊天页（V1：消息流 + SSE） ===== */
+.chat-wrap {
+  flex: 1 1 0;
+  min-width: 0;       /* 长内容不撑宽，避免出现横向滚动 */
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;   /* 关键：滚动交给内部 .msg-list，外层不滚 */
+  background: #f5f6f8;
+}
+
+.chat-header {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 24px;
+  background: #fff;
+  border-bottom: 1px solid #e5e6eb;
+}
+
+.chat-title { font-size: 16px; font-weight: 600; }
+
+.chat-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chat-user { font-size: 14px; color: #555; }
+
+.link-btn {
+  border: none;
+  background: none;
+  color: #1677ff;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+/* 消息滚动区：唯一可滚动的容器 */
+.msg-list {
+  flex: 1 1 0;
+  min-height: 0;      /* 关键：允许收缩，否则 overflow-y 不生效、整页被撑高 */
+  overflow-y: auto;
+  overscroll-behavior: contain;  /* 滚到底后不把滚动传给页面 */
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+/* 内部滚动条：细一点，别抢视觉 */
+.msg-list::-webkit-scrollbar,
+.session-list::-webkit-scrollbar { width: 8px; }
+
+.msg-list::-webkit-scrollbar-thumb,
+.session-list::-webkit-scrollbar-thumb {
+  background: #d6d8dd;
+  border-radius: 4px;
+}
+
+.msg-list::-webkit-scrollbar-thumb:hover,
+.session-list::-webkit-scrollbar-thumb:hover { background: #bfc2c9; }
+
+.msg-list::-webkit-scrollbar-track,
+.session-list::-webkit-scrollbar-track { background: transparent; }
+
+.msg-row { display: flex; margin-bottom: 16px; }
+.msg-row.user { justify-content: flex-end; }
+.msg-row.assistant { justify-content: flex-start; }
+
+.bubble {
+  max-width: 70%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;   /* 保留回答中的换行 */
+  word-break: break-word;
+}
+
+.msg-row.user .bubble {
+  background: #1677ff;
+  color: #fff;
+  border-top-right-radius: 2px;
+}
+
+.msg-row.assistant .bubble {
+  background: #fff;
+  color: #333;
+  border-top-left-radius: 2px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+/* 流式输出中的光标 */
+.bubble.streaming::after {
+  content: "▋";
+  animation: blink 1s infinite;
+  color: #999;
+}
+
+@keyframes blink { 50% { opacity: 0; } }
+
+.typing { color: #999; }
+
+/* 历史摘要提示气泡（淡色，置顶） */
+.bubble-summary {
+  background: #fffbe6;
+  color: #8c6d1f;
+  border: 1px dashed #f0d58a;
+  font-size: 13px;
+}
+
+/* 底栏：整条白底铺满，内层与消息区同宽居中 */
+.chat-input-bar {
+  flex: 0 0 auto;      /* 固定底部，不参与压缩 */
+  width: 100%;
+  padding: 14px 24px;
+  background: #fff;
+  border-top: 1px solid #e5e6eb;
+}
+
+.chat-input-inner {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.chat-input-bar input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  font-size: 14px;
+  outline: none;
+}
+
+.chat-input-bar input:focus { border-color: #1677ff; }
+
+.send-btn {
+  width: auto;
+  padding: 10px 24px;
+}
+
+.send-btn:disabled {
+  background: #a0c4ff;
+  cursor: not-allowed;
+}
+
+/* ===== 管理后台 ===== */
+.admin-wrap {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 20px 60px;
+}
+
+.admin-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e5e6eb;
+  margin-bottom: 20px;
+}
+
+.admin-title {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.admin-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-ghost {
+  padding: 7px 14px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background: #fff;
+  color: #333;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn-ghost:hover { border-color: #1677ff; color: #1677ff; }
+
+.admin-card {
+  background: #fff;
+  border: 1px solid #e5e6eb;
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin-bottom: 18px;
+}
+
+.admin-card h2 {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.upload-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.file-input {
+  flex: 1;
+  padding: 8px;
+  border: 1px dashed #d9d9d9;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.upload-row .btn {
+  width: auto;
+  padding: 9px 22px;
+  font-size: 14px;
+}
+
+.hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #86909c;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid #f0f1f3;
+  text-align: left;
+  vertical-align: top;
+}
+
+.admin-table th {
+  color: #86909c;
+  font-weight: 500;
+  background: #fafafa;
+}
+
+.admin-table td { color: #333; }
+
+.doc-name {
+  display: block;
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.doc-id {
+  display: block;
+  font-size: 11px;
+  color: #86909c;
+  word-break: break-all;
+}
+
+.btn-danger {
+  padding: 5px 12px;
+  border: 1px solid #ff4d4f;
+  border-radius: 6px;
+  background: #fff;
+  color: #ff4d4f;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.btn-danger:hover { background: #fff1f0; }
+
+.empty {
+  text-align: center;
+  color: #86909c;
+  padding: 24px 0;
+}
