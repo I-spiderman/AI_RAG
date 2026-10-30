@@ -26,7 +26,7 @@ def get_client():
     global _client
     if _client is None:
         _client = OpenAI(
-            base_url="http://localhost:11434/v1",
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
             api_key="ollama",
         )
     return _client

@@ -8,6 +8,7 @@ const messages = ref([])   // {role: 'user'|'assistant', content, streaming, sum
 const input = ref('')
 const sending = ref(false)
 const loading = ref(false)
+const handoffInfo = ref(null)   // 转人工工单卡片：{ ticketId, message }
 
 // 通用 fetch：自动带 Bearer，401 跳登录
 async function api(path, options = {}) {
@@ -173,6 +174,7 @@ async function streamChat(question, asst) {
           const p = JSON.parse(line.slice(6))
           if (p.type === 'token') pending += p.content
           else if (p.type === 'error') pending += p.content || '（服务异常）'
+          else if (p.type === 'handoff') handoffInfo.value = { ticketId: p.ticket_id, message: p.message }
         } catch (e) { /* ignore */ }
       }
       buf = ''
@@ -198,12 +200,26 @@ async function streamChat(question, asst) {
           pending += payload.content
         } else if (payload.type === 'error') {
           pending += payload.content || '（服务异常）'
+        } else if (payload.type === 'handoff') {
+          // 转人工工单帧：保留工单号，流结束后渲染成工单卡片
+          handoffInfo.value = { ticketId: payload.ticket_id, message: payload.message }
         }
         // status 帧（"正在思考…"）只作占位提示，由气泡的"正在输入…"承担，不写入回答正文
       }
     }
   } finally {
     finish()
+    // 转人工工单卡片：回复文本渲染完成后追加到消息流，作为独立卡片气泡
+    if (handoffInfo.value) {
+      messages.value.push({
+        role: 'assistant',
+        handoff: true,
+        ticketId: handoffInfo.value.ticketId,
+        content: '',
+      })
+      scrollBottom(true)
+      handoffInfo.value = null
+    }
   }
 }
 
@@ -266,12 +282,19 @@ function goAdmin() {
         <div v-if="loading" class="msg-row assistant">
           <div class="bubble">加载中…</div>
         </div>
-        <div v-for="(m, i) in messages" :key="i" class="msg-row" :class="m.role">
+        <div v-for="(m, i) in messages" :key="i" class="msg-row" :class="[m.role, { handoff: m.handoff }]">
           <div
             class="bubble"
             :class="{ streaming: m.streaming, 'bubble-summary': m.summary }"
           >
             <span v-if="!m.content && m.streaming" class="typing">正在输入…</span>
+            <template v-else-if="m.handoff">
+              <div class="handoff-card">
+                <div class="handoff-title">✅ 已为您转接人工客服</div>
+                <div class="handoff-ticket">工单号：<b>{{ m.ticketId }}</b></div>
+                <div class="handoff-tip">人工客服将尽快回复，您可凭工单号查询处理进度</div>
+              </div>
+            </template>
             <template v-else>{{ m.content }}</template>
           </div>
         </div>

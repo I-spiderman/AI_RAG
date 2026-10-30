@@ -4,6 +4,8 @@ venv/
 
 # 环境变量（里面存API密钥、数据库密码）
 .env
+.env.*
+!.env.example
 
 # 日志
 logs/
@@ -11,14 +13,24 @@ logs/
 
 # PyCharm配置
 .idea/
-.workbuddy/
+
 
 # 系统缓存
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+.pytest_cache/
 
 # 本地大模型权重，禁止提交
 backend/models/
 
+# 前端依赖
+node_modules/
+
+# 本地生成数据（向量库、工单记忆）
+backend/data/
+
+# Agent 本地工作数据（含项目记忆，仅不提交；切勿手动删除该文件夹）
+.workbuddy/

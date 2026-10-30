@@ -144,3 +144,62 @@ def delete_doc(doc_id: str, cred: HTTPAuthorizationCredentials = Depends(_bearer
     db.delete_ingest_log(doc_id)
     logger.info(f"[管理员 {username}] 删除文档：{doc_id}")
     return {"deleted": doc_id}
+
+
+@router.get("/tickets")
+def list_tickets(status: str = None, source: str = None, limit: int = 100,
+                 cred: HTTPAuthorizationCredentials = Depends(_bearer)):
+    """工单列表：按状态/来源筛选（管理端用）。默认返回全部最新工单。"""
+    _require_admin(cred)
+    rag = get_rag()
+    if rag is None:
+        raise HTTPException(status_code=503, detail="服务初始化中，请稍后重试")
+    return rag.tm.list_tickets_mysql(status=status, source=source, limit=limit)
+
+
+@router.get("/tickets/{ticket_id}")
+def get_ticket(ticket_id: str, cred: HTTPAuthorizationCredentials = Depends(_bearer)):
+    """工单详情"""
+    _require_admin(cred)
+    rag = get_rag()
+    if rag is None:
+        raise HTTPException(status_code=503, detail="服务初始化中，请稍后重试")
+    row = rag.tm.get_ticket_mysql(ticket_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return row
+
+
+@router.post("/tickets/{ticket_id}/claim")
+def claim_ticket(ticket_id: str, cred: HTTPAuthorizationCredentials = Depends(_bearer)):
+    """认领工单：assignee=当前管理员，status=处理中"""
+    user_id, username = _require_admin(cred)
+    rag = get_rag()
+    if rag is None:
+        raise HTTPException(status_code=503, detail="服务初始化中，请稍后重试")
+    ok = rag.tm.update_ticket_mysql(ticket_id, assignee=username, status="处理中")
+    if not ok:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    # 同步 Chroma（向量库仅作检索，状态保持一致；assignee 不在其字段内会被忽略）
+    rag.tm.update_ticket(ticket_id, status="处理中")
+    return {"ok": True, "assignee": username, "status": "处理中"}
+
+
+@router.put("/tickets/{ticket_id}")
+def update_ticket_api(ticket_id: str, item: dict,
+                      cred: HTTPAuthorizationCredentials = Depends(_bearer)):
+    """更新工单（人工填写处理结果 / 改状态 / 分类 / 处理过程）"""
+    _require_admin(cred)
+    rag = get_rag()
+    if rag is None:
+        raise HTTPException(status_code=503, detail="服务初始化中，请稍后重试")
+    # 仅透传白名单字段，避免前端误传 ticket_id 等
+    allowed = {"resolution", "status", "category", "process"}
+    fields = {k: v for k, v in (item or {}).items() if k in allowed}
+    if not fields:
+        raise HTTPException(status_code=400, detail="无可更新字段")
+    ok = rag.tm.update_ticket_mysql(ticket_id, **fields)
+    if not ok:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    rag.tm.update_ticket(ticket_id, **fields)
+    return {"ok": True, "fields": fields}

@@ -93,9 +93,63 @@ async function loadTickets() {
   }
 }
 
+// ---- 转人工工单（管理端闭环） ----
+const handoffTickets = ref([])
+const loadingHandoff = ref(false)
+const handoffFilter = ref('待处理')   // 待处理 / 处理中 / 已关闭 / 全部
+const selectedTicket = ref(null)
+const resolutionDraft = ref('')
+
+async function loadHandoffTickets() {
+  loadingHandoff.value = true
+  try {
+    const params = new URLSearchParams()
+    if (handoffFilter.value && handoffFilter.value !== '全部') params.set('status', handoffFilter.value)
+    params.set('source', 'human_request')
+    handoffTickets.value = await api(`/api/admin/tickets?${params.toString()}`)
+  } catch (e) {
+    alert(`加载工单失败：${e.message}`)
+  } finally {
+    loadingHandoff.value = false
+  }
+}
+
+function openTicket(t) {
+  selectedTicket.value = t
+  resolutionDraft.value = t.resolution || ''
+}
+
+async function claimTicket(t) {
+  try {
+    await api(`/api/admin/tickets/${t.ticket_id}/claim`, { method: 'POST' })
+    await loadHandoffTickets()
+    selectedTicket.value = handoffTickets.value.find(x => x.ticket_id === t.ticket_id) || null
+  } catch (e) {
+    alert(`认领失败：${e.message}`)
+  }
+}
+
+async function closeTicket(t) {
+  if (!resolutionDraft.value.trim()) {
+    alert('请先填写处理结果')
+    return
+  }
+  try {
+    await api(`/api/admin/tickets/${t.ticket_id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ resolution: resolutionDraft.value, status: '已关闭' }),
+    })
+    await loadHandoffTickets()
+    selectedTicket.value = null
+  } catch (e) {
+    alert(`结单失败：${e.message}`)
+  }
+}
+
 onMounted(() => {
   loadDocs()
   loadTickets()
+  loadHandoffTickets()
 })
 </script>
 
@@ -180,6 +234,56 @@ onMounted(() => {
           </tr>
         </tbody>
       </table>
+    </section>
+
+    <!-- 转人工工单 -->
+    <section class="admin-card">
+      <h2>转人工工单（{{ handoffTickets.length }}）</h2>
+      <div class="upload-row" style="margin-bottom:12px">
+        <button v-for="s in ['待处理','处理中','已关闭','全部']" :key="s"
+                class="btn-ghost" :class="{active: handoffFilter===s}"
+                @click="handoffFilter=s; loadHandoffTickets()">{{ s }}</button>
+        <button class="btn-ghost" @click="loadHandoffTickets()">刷新</button>
+      </div>
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>工单号</th><th>问题</th><th>用户</th><th>状态</th><th>负责人</th><th>创建时间</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in handoffTickets" :key="t.ticket_id" @click="openTicket(t)" style="cursor:pointer">
+            <td><span class="doc-id">{{ t.ticket_id }}</span></td>
+            <td>{{ t.question }}</td>
+            <td>{{ t.user_id }}</td>
+            <td><span :class="['badge', 'badge-' + t.status]">{{ t.status }}</span></td>
+            <td>{{ t.assignee || '—' }}</td>
+            <td>{{ t.created_at }}</td>
+            <td>
+              <button v-if="t.status==='待处理'" class="btn-danger" @click.stop="claimTicket(t)">认领</button>
+            </td>
+          </tr>
+          <tr v-if="!loadingHandoff && handoffTickets.length === 0">
+            <td colspan="7" class="empty">暂无转人工工单</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- 详情 / 处理 -->
+      <div v-if="selectedTicket" class="handoff-detail">
+        <h3>工单详情 {{ selectedTicket.ticket_id }}</h3>
+        <p><b>问题：</b>{{ selectedTicket.question }}</p>
+        <p><b>处理过程：</b>{{ selectedTicket.process }}</p>
+        <p><b>当前状态：</b>{{ selectedTicket.status }} ｜ <b>负责人：</b>{{ selectedTicket.assignee || '—' }}</p>
+        <label>处理结果</label>
+        <textarea v-model="resolutionDraft" rows="3"></textarea>
+        <div class="upload-row" style="margin-top:8px">
+          <button v-if="selectedTicket.status==='待处理'" class="btn" style="width:auto"
+                  @click="claimTicket(selectedTicket)">认领并接手</button>
+          <button class="btn" style="width:auto" @click="closeTicket(selectedTicket)">填写结果并结单</button>
+          <button class="btn-ghost" @click="selectedTicket=null">关闭</button>
+        </div>
+      </div>
     </section>
   </div>
 </template>

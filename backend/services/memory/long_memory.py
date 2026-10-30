@@ -14,7 +14,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 MYSQL_CONFIG = {
-    "host": "localhost",
+    "host": os.getenv("mysql_host", "localhost"),
     "port": 3306,
     "user": "root",
     "password": os.getenv("mysql_password"),
@@ -264,6 +264,12 @@ class TicketMemory:
         )
         self.dedup_threshold = dedup_threshold
         self.min_score = min_score
+        # MySQL 工单表（结构化主存：管理端按状态/来源查询与状态流转用）；
+        # 连不上不阻塞主流程，降级为仅 Chroma 向量检索。
+        try:
+            self._ensure_tickets_table()
+        except Exception:
+            logger.warning("工单 MySQL 表初始化失败（降级为仅 Chroma）", exc_info=True)
         logger.info(f"工单库准备就绪： tickets={self.col.count()} 条")
 
     @staticmethod
@@ -276,8 +282,12 @@ class TicketMemory:
         )
 
     def add_ticket(self, user_id: str, question: str, process: str,
-                   resolution: str, category: str = "未分类") -> Dict:
-        """写入工单，相似度 >= dedup_threshold 则合并计数不新增"""
+                   resolution: str, category: str = "未分类",
+                   source: str = "auto", status: str = "已解决") -> Dict:
+        """写入工单，相似度 >= dedup_threshold 则合并计数不新增。
+        source: auto(会话结束自动提炼) / human_request(用户转人工)
+        status: 已解决 / 待处理 / 处理中 / 已关闭
+        """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         doc = self._build_ticket_text(question, process, resolution, category)
         emb = embed_texts([doc])[0]
@@ -314,11 +324,208 @@ class TicketMemory:
                 "created_at": now,
                 "occurrences": 1,
                 "first_occurred_at": now,
-                "last_occurred_at": now
+                "last_occurred_at": now,
+                # 来源与状态：自动提炼 / 用户转人工；已解决 / 待处理 / 处理中 / 已关闭
+                "source": source,
+                "status": status,
             }]
                )
-        logger.info(f"[工单] 新增工单: {tid}")
-        return {"ticket_id": tid, "action": "added", "occurrences": 1}
+        logger.info(f"[工单] 新增工单: {tid}（source={source}, status={status}）")
+        # 双写 MySQL（结构化主存：管理端按状态/来源查询与状态流转用；Chroma 仅用于向量检索）
+        self.upsert_ticket_mysql(tid, user_id, question, process, resolution,
+                                category, source, status)
+        return {"ticket_id": tid, "action": "added", "occurrences": 1, "source": source, "status": status}
+
+    # ---------------- MySQL 结构化工单主存（管理端查询 / 状态流转） ----------------
+    # Chroma 仍保留用于相似工单向量检索；MySQL 负责结构化筛选、认领、结单等运营操作。
+    def _ensure_tickets_table(self) -> None:
+        """建 tickets 表（连不上不抛异常，降级为仅 Chroma）"""
+        conn = None
+        try:
+            conn = pymysql.connect(**MYSQL_CONFIG)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS tickets (
+                        ticket_id  VARCHAR(32) PRIMARY KEY,
+                        user_id    VARCHAR(64),
+                        question   TEXT,
+                        process    TEXT,
+                        resolution TEXT,
+                        category   VARCHAR(64) DEFAULT '未分类',
+                        source     VARCHAR(32) DEFAULT 'auto',
+                        status     VARCHAR(32) DEFAULT '已解决',
+                        assignee   VARCHAR(64) DEFAULT '',
+                        created_at DATETIME,
+                        updated_at DATETIME,
+                        INDEX idx_tickets_status (status)
+                    )"""
+                )
+            conn.commit()
+            logger.info("工单 MySQL 表就绪（tickets）")
+        except Exception as e:
+            logger.warning(f"工单 MySQL 表初始化失败（降级为仅 Chroma）：{e}")
+        finally:
+            if conn:
+                conn.close()
+
+    def upsert_ticket_mysql(self, ticket_id, user_id, question, process, resolution,
+                            category="未分类", source="auto", status="已解决") -> None:
+        """写入/更新一条工单到 MySQL（按 ticket_id 幂等）"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = None
+        try:
+            conn = pymysql.connect(**MYSQL_CONFIG)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO tickets
+                       (ticket_id,user_id,question,process,resolution,category,source,status,created_at,updated_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE
+                       question=VALUES(question), process=VALUES(process),
+                       resolution=VALUES(resolution), category=VALUES(category),
+                       source=VALUES(source), status=VALUES(status), updated_at=VALUES(updated_at)""",
+                    (ticket_id, user_id, question, process, resolution, category, source, status, now, now),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"[工单] MySQL 写入失败（降级）：{e}")
+        finally:
+            if conn:
+                conn.close()
+
+    def update_ticket_mysql(self, ticket_id, **fields) -> bool:
+        """更新 MySQL 工单字段（resolution/status/category/process/assignee）"""
+        allowed = ("resolution", "status", "category", "process", "assignee")
+        sets = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not sets:
+            return False
+        sets["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cols = ", ".join(f"{k}=%s" for k in sets)
+        conn = None
+        try:
+            conn = pymysql.connect(**MYSQL_CONFIG)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE tickets SET {cols} WHERE ticket_id=%s",
+                    list(sets.values()) + [ticket_id],
+                )
+                if cur.rowcount == 0:
+                    return False
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"[工单] MySQL 更新失败：{e}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+
+    def list_tickets_mysql(self, status=None, source=None, limit=100) -> List[dict]:
+        """按状态/来源筛选工单列表（管理端用），最新在前"""
+        conn = None
+        try:
+            conn = pymysql.connect(**MYSQL_CONFIG)
+            with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                where, params = [], []
+                if status:
+                    where.append("status=%s")
+                    params.append(status)
+                if source:
+                    where.append("source=%s")
+                    params.append(source)
+                sql = "SELECT * FROM tickets"
+                if where:
+                    sql += " WHERE " + " AND ".join(where)
+                sql += " ORDER BY created_at DESC LIMIT %s"
+                params.append(limit)
+                cur.execute(sql, params)
+                return cur.fetchall() or []
+        except Exception as e:
+            logger.error(f"[工单] MySQL 查询失败：{e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    def get_ticket_mysql(self, ticket_id) -> Optional[dict]:
+        """按 ticket_id 取单条工单（管理端详情用）"""
+        conn = None
+        try:
+            conn = pymysql.connect(**MYSQL_CONFIG)
+            with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                cur.execute("SELECT * FROM tickets WHERE ticket_id=%s", (ticket_id,))
+                return cur.fetchone()
+        except Exception as e:
+            logger.error(f"[工单] MySQL 查询失败：{e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
+    def create_handoff_ticket(self, user_id: str, question: str) -> Dict:
+        """用户主动转人工：总是落一张全新的「待处理」工单并同步返回 ticket_id。
+
+        - 不走 add_ticket 的去重合并：每次转人工都是独立事件，需可追踪、
+          不能并入已解决的历史工单（否则状态会被旧单覆盖，永远停在「已解决」）；
+        - source=human_request 与自动提炼工单（source=auto）区分，便于管理端筛选；
+        - 纯「转人工」场景可能没有 open 业务线程，这里保证一定能建单并回传工单号。
+        """
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        category = "人工转接"
+        process = "用户主动要求转人工客服，等待人工接手（AI 阶段无处理过程记录）。"
+        resolution = "待人工客服处理"
+        doc = self._build_ticket_text(question, process, resolution, category)
+        emb = embed_texts([doc])[0]
+        tid = uuid.uuid4().hex[:12]
+        self.col.add(
+            ids=[tid],
+            documents=[doc],
+            embeddings=[emb],
+            metadatas=[{
+                "ticket_id": tid,
+                "user_id": user_id,
+                "category": category,
+                "resolution": resolution,
+                "created_at": now,
+                "occurrences": 1,
+                "first_occurred_at": now,
+                "last_occurred_at": now,
+                "source": "human_request",
+                "status": "待处理",
+            }]
+        )
+        logger.info(f"[转人工] 新增待处理工单: {tid}（user={user_id}）")
+        # 双写 MySQL（结构化主存：管理端待处理工单列表/认领/结单用）
+        self.upsert_ticket_mysql(tid, user_id, question, process, resolution,
+                                category="人工转接", source="human_request", status="待处理")
+        return {"ticket_id": tid, "action": "added", "occurrences": 1, "source": "human_request", "status": "待处理"}
+
+    def update_ticket(self, ticket_id: str, **fields) -> bool:
+        """人工接手后补录/更新工单字段（resolution / status / category / process 等）。
+
+        仅更新传入的字段，其余保持原值；用于转人工工单被人工处理完后的状态回填。
+        返回 True 表示更新成功，False 表示工单不存在。
+        """
+        try:
+            old = self.col.get(ids=[ticket_id], include=["metadatas"])
+        except Exception as e:
+            logger.error(f"[工单] 查询待更新工单失败: {ticket_id}, {e}")
+            return False
+        if not old["ids"]:
+            logger.warning(f"[工单] 待更新工单不存在: {ticket_id}")
+            return False
+        old_meta = old["metadatas"][0]
+        new_meta = dict(old_meta)
+        allowed = ("resolution", "status", "category", "process", "user_id")
+        for k in allowed:
+            if k in fields and fields[k] is not None:
+                new_meta[k] = fields[k]
+        new_meta["last_occurred_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.col.update(ids=[ticket_id], metadatas=[new_meta])
+        logger.info(f"[工单] 更新工单: {ticket_id}（字段 {list(fields.keys())}）")
+        # 同步 MySQL 结构化主存（管理端状态流转用）
+        self.update_ticket_mysql(ticket_id, **fields)
+        return True
 
     def query_tickets(self, question: str, top_k: int = 5,
                       user_id: Optional[str]=None, category: Optional[str]=None) -> List[dict]:

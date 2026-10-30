@@ -14,7 +14,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _DB_CONFIG = {
-    'host': 'localhost',
+    'host': os.getenv('mysql_host', 'localhost'),
     'user': 'root',
     'password': os.getenv('mysql_password'),
     'database': 'rag_service',

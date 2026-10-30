@@ -27,6 +27,7 @@ from backend.services.core.intent_recognizer import (
 )
 from backend.services.llm.chitchat import ChitchatEngine
 from backend.services.memory.ticket_service import TicketQueryService
+from backend.services.memory.ticket_thread import TicketThreadManager, is_finish_short
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,10 @@ class RAGService:
         self._session_intents = {}
         self._last_intent = {}
         self.intent_recognizer = IntentRecognizer()
+
+        # 工单候选线程（Redis 全程存储，多 worker 安全）+ 空闲扫描后台线程
+        self.thread_mgr = TicketThreadManager(ticket_memory=self.tm)
+        threading.Thread(target=self.thread_mgr.run_scan_loop, daemon=True).start()
 
         # 画像（MySQL）：连不上不阻塞主流程
         try:
@@ -151,6 +156,16 @@ class RAGService:
             memory_context=memory_context,
         )
 
+    def _thread_after_reply(self, session_id: str, reply: str) -> None:
+        """工单候选：助手回复并入线程；累计 tokens 超阈值 → 后台滚动摘要"""
+        over = self.thread_mgr.append(session_id, "assistant", reply)
+        if over:
+            threading.Thread(
+                target=self.thread_mgr.summarize,
+                args=(session_id,),
+                daemon=True,
+            ).start()
+
     def ask_stream(self, question: str, session_id: str = "cli_user", user_id: str = "cli_user") -> Iterator[str]:
         """
         流式问答（主入口）：记忆记问 → 拼 prompt → 逐块 yield → 记忆记答。
@@ -167,16 +182,67 @@ class RAGService:
 
         # 1.短期记忆记录用户问题（所有分支共用）
         self.memory.add(session_id, "user", question, user_id=user_id)
+        logger.info(f"用户问题：{question}")
 
-        # ---- 分流：request_human → 转人工（简化版） ----
+        # 1.1 工单候选线程：仅业务问题（query_knowledge）开线/并入/话题切换；
+        #     查工单（query_ticket）本质是查询历史，不并入业务候选（并入会污染工单提炼），
+        #     其归档在下方 QUERY_TICKET 分支单独处理。
+        if intent == QUERY_KNOWLEDGE:
+            topic = None
+            try:
+                qvec = embed_texts([question])[0]
+                # 纯相似度分类（text=None 不触发 LLM 兜底，零延迟）
+                cls = self.vs.classify(qvec, text=None)
+                # category 相似度不足时为 None → 用前二类别兜底，保证 topic 有值，B 触发器才可工作
+                topic = cls.get("category") or (cls.get("top2") or [None])[0]
+            except Exception as e:
+                logger.warning(f"工单线程主题分类失败：{e}")
+            if not self.thread_mgr.is_open(session_id):
+                self.thread_mgr.open(session_id, user_id, topic)
+            elif topic:
+                cur_topic = self.thread_mgr.topic(session_id)
+                # 话题转移（B 触发器）：双方都有确定类别且不同才切换，避免"未确定→真实类别"误判
+                if cur_topic and cur_topic != topic:
+                    self.thread_mgr.archive(session_id, user_id, reason="topic_switch")
+                    self.thread_mgr.open(session_id, user_id, topic)
+            self.thread_mgr.append(session_id, "user", question)
+
+        # ---- 分流：request_human → 转人工 ----
         if intent == REQUEST_HUMAN:
+            # 1. 先归档 AI 阶段业务线程（T1）：无 open 线程则自动跳过，不建空壳单
+            self.thread_mgr.archive(session_id, user_id, reason="human_handoff")
+            # 2. 立即落一张「待处理」工单并同步拿回 ticket_id
+            #    （纯转人工可能没有 open 业务线程，这里保证一定建单并回传工单号）
+            ticket_id = None
+            try:
+                handoff = self.tm.create_handoff_ticket(user_id, question)
+                ticket_id = handoff.get("ticket_id")
+            except Exception as e:
+                logger.error(f"[转人工] 建单失败：{e}")
+            # 3. 正常回复文本（作为助手气泡正文）
             yield HANDOFF_REPLY
+            # 4. 额外的 handoff 帧：携带工单号，前端据此渲染工单卡片
+            if ticket_id:
+                yield {
+                    "type": "handoff",
+                    "ticket_id": ticket_id,
+                    "message": HANDOFF_REPLY,
+                }
             self.memory.add(session_id, "assistant", HANDOFF_REPLY, user_id=user_id)
-            logger.info(f"[转人工] 用户要求人工客服：{question}")
+            logger.info(f"[转人工] 用户要求人工客服：{question}（工单 {ticket_id}）")
             return
 
         # ---- 分流：chitchat → 闲聊（预设话术，不走检索） ----
         if intent == CHITCHAT:
+            # 上一轮是业务意图 → 本轮闲聊意味着"业务线程该结束了"，两种情形都要归档：
+            #   A 用户收尾（谢谢/明白了/解决了…）→ reason=user_finish
+            #   B 话题转移（换聊别的，如"今天天气怎么样"）→ reason=topic_switch
+            # 原实现只判 A（is_finish_short），导致"业务问题 → 闲聊"这条路径线程一直 open、
+            # 工单永远不提炼（B 触发器此前只覆盖了 QUERY_KNOWLEDGE 内部的新业务问题切换）。
+            if prev_intent in (QUERY_KNOWLEDGE, QUERY_TICKET) and self.thread_mgr.is_open(session_id):
+                reason = "user_finish" if is_finish_short(question) else "topic_switch"
+                self.thread_mgr.archive(session_id, user_id, reason=reason)
+                logger.info(f"[工单线程] 业务→闲聊触发归档（{reason}）：{session_id}")
             history = self.memory.to_messages(session_id)
             parts = []
             for piece in self.chitchat.chat_stream(question, history):
@@ -189,9 +255,15 @@ class RAGService:
 
         # ---- 分流：query_ticket → 工单查询（简化版） ----
         if intent == QUERY_TICKET:
+            # 从业务问题切到"查工单"：先把当前业务线程归档（topic_switch），
+            # 查工单结果不并入业务候选（否则会污染工单提炼）。若归档仍 archiving，
+            # 后续新一轮业务问题触发 open 时会等待其完成再开新线程（串行化保证）。
+            if self.thread_mgr.is_open(session_id):
+                self.thread_mgr.archive(session_id, user_id, reason="topic_switch")
             reply = self.ticket_service.answer(question, user_id)
             yield reply
             self.memory.add(session_id, "assistant", reply, user_id=user_id)
+            self._thread_after_reply(session_id, reply)
             return
 
         # ---- query_knowledge：现有 RAG 流程（检索/工单/画像/记忆） ----
@@ -206,6 +278,8 @@ class RAGService:
         # 生成结束后记录回答
         answer = "".join(parts)
         self.memory.add(session_id, "assistant", answer, user_id=user_id)
+        # 工单候选：并入助手回答，超 token 阈值则后台滚动摘要
+        self._thread_after_reply(session_id, answer)
         logger.info(f"问答完成：耗时 {time.time() - start_all:.2f}s")
 
     def ask(self, question: str, session_id: str = "cli_user", user_id: str = "cli_user") -> str:
@@ -255,24 +329,5 @@ class RAGService:
             else:
                 logger.info("最后一整批画像已提取过，跳过画像归档")
 
-        # ---------- 2. 工单兜底提炼 ----------
-        intents = self._session_intents.get(session_id, set())
-        if not (intents & {QUERY_KNOWLEDGE, QUERY_TICKET}):
-            logger.info("本次会话无实质业务问题（纯闲聊），跳过工单提炼")
-            return
-        ctx = self.memory.get_context(session_id)
-        text = f"【对话摘要】\n{ctx['summary']}\n【最近对话】\n"
-        text += "\n".join(f"{role}: {content}" for role, content in ctx["window"])
-        if not ctx["summary"] and not ctx["window"]:
-            logger.info("本次会话无内容，跳过工单归档")
-            return
-        try:
-            ticket = self.tm.summarize_to_ticket(text)
-            if ticket["question"] and ticket["resolution"]:
-                self.tm.add_ticket(
-                    user_id, ticket["question"], ticket["process"],
-                    ticket["resolution"], ticket["category"],
-                )
-                logger.info(f"工单已归档：{ticket['question'][:30]}")
-        except Exception as e:
-            logger.error(f"工单提炼失败：{e}")
+        # ---------- 2. 工单兜底：归档该会话所有 open 线程（无业务线程则自动跳过） ----------
+        self.thread_mgr.archive_all(session_id, user_id)

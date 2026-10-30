@@ -48,7 +48,11 @@ def chat(req: ChatRequest, cred: HTTPAuthorizationCredentials = Depends(_bearer)
         yield _frame({"type": "status", "content": "正在思考..."})
         try:
             for piece in rag.ask_stream(req.question, req.session_id, user_id):
-                yield _frame({"type": "token", "content": piece})
+                # ask_stream 正常 yield 文本片段（token）；特殊帧（如 handoff）yield dict
+                if isinstance(piece, dict):
+                    yield _frame(piece)
+                else:
+                    yield _frame({"type": "token", "content": piece})
             yield _frame({"type": "done"})
         except Exception as e:
             logger.exception(f"问答流异常：{e}")
